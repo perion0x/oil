@@ -152,15 +152,15 @@ def hormuz_poly_cumulative(events: list[dict]) -> dict[dt.date, tuple[float, flo
             d = re.search(r"by-([a-z]+)-(\d+)", slug)
             if m and d:
                 date = dt.date(2026, MONTHS.index(d.group(1).capitalize()) + 1, int(d.group(2)))
-                out[date] = (fnum(m[0]["bestBid"]) or 0.0, fnum(m[0]["bestAsk"]) or 1.0, "by-date market")
+                out[date] = (fnum(m[0].get("bestBid")) or 0.0, fnum(m[0].get("bestAsk")) or 1.0, "by-date market")
         if slug.startswith("which-month-will-strait-of-hormuz"):
             months = {x["groupItemTitle"]: x for x in e["markets"] if not x.get("closed")}
             bid = ask = 0.0
             for i, name in enumerate(MONTHS[7:], start=8):  # August onwards
                 if name not in months:
                     continue
-                bid += fnum(months[name]["bestBid"]) or 0.0
-                ask += fnum(months[name]["bestAsk"]) or 1.0
+                bid += fnum(months[name].get("bestBid")) or 0.0
+                ask += fnum(months[name].get("bestAsk")) or 1.0
                 last = (dt.date(2026, i + 1, 1) if i < 12 else dt.date(2027, 1, 1)) - dt.timedelta(days=1)
                 out.setdefault(last, (bid, ask, "sum of month buckets"))
     return out
