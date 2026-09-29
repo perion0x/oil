@@ -3,6 +3,7 @@
     python refresh_data.py            # Extended: WTI, XBR, XAU, PAXG (hourly + funding)
     python refresh_data.py --hl       # also trade[XYZ] on Hyperliquid (hourly + funding)
     python refresh_data.py --days 180
+    PYTH_API_KEY=... python refresh_data.py --pyth   # WTI contract history (Pyth Pro)
 
 Files are written to ../data in the format common.py reads.
 """
@@ -92,10 +93,33 @@ def refresh_hyperliquid(start: int, end: int) -> None:
             print(f"  {coin}: no data (not listed?)")
 
 
+PYTH = "https://pyth.dourolabs.app/v1"
+PYTH_WTI = ("N6", "Q6", "U6", "V6", "X6", "Z6", "F7")
+
+
+def refresh_pyth(start: int, end: int) -> None:
+    """Per-contract WTI history (front/next legs of the roll). Needs a Pyth Pro
+    key in PYTH_API_KEY; the key is sent only to Pyth and never written out."""
+    key = os.environ["PYTH_API_KEY"]
+    for c in PYTH_WTI:
+        r = requests.get(f"{PYTH}/fixed_rate@200ms/history",
+                         params={"symbol": f"Commodities.WTI{c}/USD", "from": start // 1000,
+                                 "to": end // 1000, "resolution": "60"},
+                         headers={"Authorization": f"Bearer {key}"}, timeout=60)
+        if r.status_code != 200 or r.json().get("s") != "ok":
+            print(f"  WTI{c}: {r.status_code} {r.text[:120]}")
+            continue
+        j = r.json()
+        save(f"ext_PYTH_WTI{c}_trades_1h.json",
+             [{"o": o, "h": h, "l": l, "c": c_, "T": t * 1000}
+              for t, o, h, l, c_ in zip(j["t"], j["o"], j["h"], j["l"], j["c"])])
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=150)
     ap.add_argument("--hl", action="store_true", help="also fetch trade[XYZ] from Hyperliquid")
+    ap.add_argument("--pyth", action="store_true", help="also fetch WTI contracts from Pyth (needs PYTH_API_KEY)")
     a = ap.parse_args()
     end = int(time.time() * 1000)
     start = end - a.days * 86_400_000
@@ -105,3 +129,6 @@ if __name__ == "__main__":
     if a.hl:
         print("Hyperliquid (trade[XYZ]):")
         refresh_hyperliquid(start, end)
+    if a.pyth:
+        print("Pyth WTI contracts:")
+        refresh_pyth(start, end)

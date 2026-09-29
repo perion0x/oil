@@ -7,12 +7,59 @@ the same contracts on the same schedule as trade[XYZ].
 
 | Idea | Verdict on Extended data | Why |
 |---|---|---|
-| 1. Oil roll capture | **Positive only when the curve is steeply backwardated: ~+0.8% to +1.4% per roll on trade[XYZ] (4/4 in Aug–Sep)**; loses when the spread is small | Funding plus the perp's pre-step discount absorb most, not all, of the spread |
+| 1. Oil roll capture | **Weak. With real contract prices (WTI): +0.3% avg per roll, 2 of 4 positive; the "4/4" seen earlier was an artifact of the spread estimate** | Funding plus the perp's pre-step discount absorb most of the spread |
 | 2. Weekend convergence | **Brent small positive (+0.2%/weekend), WTI ~0, gold no** | Both venues price 86–93% of oil's weekend move; both price only 14–20% of gold's, so neither leads |
 | 3. Market making | **No edge in a rough 1-minute simulation** | Adverse selection ≈ the quoted spread; needs forward paper-trading at real speed |
 | 4. PAXG vs XAU | **Loses after realistic costs** | Fair-value spread sd ≈ 12bp < ~14bp round-trip cost; apparent profits on trade prices were bid/ask bounce |
 
-## 1. Oil roll capture (`roll.py`)
+## Update: real contract prices (Pyth), $1,000 account (`roll_direct.py`)
+
+Pyth Pro per-contract WTI history (WTIN6…WTIZ6) replaces the spread estimate
+for WTI. Both legs use real prices: trade[XYZ] `xyz:CL` for the short, the
+front-month contract for the hedge (what Veranta, which prices off Pyth, would
+hold), plus HL funding and costs. Pyth prices match Extended's index to within
+a few cents before each roll. The trial key had no access to Brent contracts,
+so Brent below remains estimate-based.
+
+**The estimate was wrong in two of four WTI rolls**, so the earlier WTI numbers
+are superseded:
+
+| Roll | Real spread in / out | Old estimate | Net, Veranta hedge (docs fees) | Net, CME hedge |
+|---|---|---|---|---|
+| Jun-26 | 2.69% / 1.65% | 0.24% | −0.02% | +0.12% |
+| Jul-26 | 0.34% / 0.98% | −0.13% | +0.82% | +0.84% |
+| Aug-26 | 1.32% / 1.05% | 2.47% | −0.26% | −0.19% |
+| Sep-26 | 3.11% / 4.75% | 5.12% | +0.80% | +0.95% |
+
+- All four rolls average **+0.34%** (Veranta hedge). The >2%-spread filter
+  keeps Jun and Sep: −0.02% and +0.80%.
+- Oil moved 5–9% inside each window. The hedge cancelled that, but each leg
+  swung up to ~9% before netting out. The two legs sit on different venues and
+  can't share margin, so each needs its own buffer.
+
+**$1,000 account** (split $500 per venue, only rolls with a spread above 2% at
+entry, compounding):
+
+| Hedge | 2x per leg | 3x per leg | Worst single-leg drawdown (3x) |
+|---|---|---|---|
+| Veranta, docs fees | $1,007.80 (+0.8%) | $1,011.70 (+1.2%) | 28% of that leg's margin |
+| Veranta, API fees | $1,005.79 (+0.6%) | $1,008.68 (+0.9%) | 28% |
+| CME | $1,010.63 (+1.1%) | $1,015.96 (+1.6%) | 28% |
+
+That's **$6–16 over four months** on $1,000. Positive, but small, and it
+rests on one good roll (Sep).
+
+**Brent weekend trade, $1,000** ($500 per venue, 3x, 17 weekends):
+
+| Extended leg priced on | Gap > 0.2% | Gap > 0.5% |
+|---|---|---|
+| last trade | 10 trades → $1,035.22 (+3.5%), worst +$1.23 | 2 → $1,014.24 |
+| mark | 17 trades → $1,059.63 (+6.0%), worst −$7.51 | 12 → $1,011.36, worst −$16.04 |
+
+Neither price series is exactly executable. Expect the truth to sit between
+the two until the live monitor's bid/ask log confirms it.
+
+## 1. Oil roll capture (`roll.py`, estimate-based; superseded for WTI by the section above)
 
 Short the perp through trade[XYZ]'s / Extended's 5-step roll, long the front
 month. Net = spread at exit + funding received + (premium at entry − at exit) − fees.
