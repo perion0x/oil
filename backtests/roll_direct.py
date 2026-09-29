@@ -22,16 +22,42 @@ import sys
 from common import HOUR_MS, candles, et_ms, fmt_pct, funding, price_at
 from roll import HEDGES, MIN_SPREAD, PERP_FEE, ROLLS
 
-# trade[XYZ] WTI roll: (front, next) contract codes per window.
-WTI_CONTRACTS = {"Jun-26": ("N6", "Q6"), "Jul-26": ("Q6", "U6"),
+# trade[XYZ] WTI roll windows (5th-9th business day, weights step ~17:30 ET).
+# Apr-Sep match the published schedule and the weights implied by prices;
+# Feb/Mar follow the same rule (implied weights noisy: the spread was tiny).
+WTI_ROLLS = {
+    "Feb-26": [(2026, 2, 6), (2026, 2, 9), (2026, 2, 10), (2026, 2, 11), (2026, 2, 12)],
+    "Mar-26": [(2026, 3, 6), (2026, 3, 9), (2026, 3, 10), (2026, 3, 11), (2026, 3, 12)],
+    "Apr-26": [(2026, 4, 8), (2026, 4, 9), (2026, 4, 10), (2026, 4, 13), (2026, 4, 14)],
+    "May-26": [(2026, 5, 7), (2026, 5, 8), (2026, 5, 11), (2026, 5, 12), (2026, 5, 13)],
+    **ROLLS,
+}
+# (front, next) contract codes per window.
+WTI_CONTRACTS = {"Feb-26": ("H6", "J6"), "Mar-26": ("J6", "K6"), "Apr-26": ("K6", "M6"),
+                 "May-26": ("M6", "N6"), "Jun-26": ("N6", "Q6"), "Jul-26": ("Q6", "U6"),
                  "Aug-26": ("U6", "V6"), "Sep-26": ("V6", "X6")}
 
 
+def perp_price_fn():
+    """trade[XYZ] price at a time: hourly candles where kept (HL keeps the last
+    5000), 4-hourly before that."""
+    h1 = candles("HL_CL", "trades")
+    try:
+        h4 = candles("HL_CL", "trades", "4h")
+    except FileNotFoundError:
+        h4 = {}
+    first_h1 = min(h1)
+
+    def px(t):
+        return price_at(h1, t) if t > first_h1 + HOUR_MS else price_at(h4, t, 4 * HOUR_MS)
+    return px
+
+
 def run(lead_h: int = 1, hedge: str = "veranta") -> list[dict]:
-    perp, fund = candles("HL_CL", "trades"), funding("HL_CL")
+    px, fund = perp_price_fn(), funding("HL_CL")
     hg = HEDGES[hedge]
     rows = []
-    for label, days in ROLLS.items():
+    for label, days in WTI_ROLLS.items():
         f1c, f2c = WTI_CONTRACTS[label]
         try:
             f1, f2 = candles(f"PYTH_WTI{f1c}", "trades"), candles(f"PYTH_WTI{f2c}", "trades")
@@ -40,7 +66,7 @@ def run(lead_h: int = 1, hedge: str = "veranta") -> list[dict]:
         (y0, m0, d0), (y1, m1, d1) = days[0], days[-1]
         t0 = et_ms(y0, m0, d0, 17) - lead_h * HOUR_MS
         t1 = et_ms(y1, m1, d1, hg["exit_hour"])
-        p0, p1, a0, a1, b0, b1 = (price_at(perp, t0), price_at(perp, t1), price_at(f1, t0),
+        p0, p1, a0, a1, b0, b1 = (px(t0), px(t1), price_at(f1, t0),
                                   price_at(f1, t1), price_at(f2, t0), price_at(f2, t1))
         if None in (p0, p1, a0, a1, b0, b1):
             continue
@@ -50,7 +76,7 @@ def run(lead_h: int = 1, hedge: str = "veranta") -> list[dict]:
         costs = 2 * PERP_FEE["hl"] + hg["cost"] + hg["hold_h"] * len(hours)
         # Worst mark-to-market of each leg during the hold (for margin/liquidation).
         path = range(t0, t1 + 1, HOUR_MS)
-        short_worst = min(-(price_at(perp, t) / p0 - 1) for t in path if price_at(perp, t))
+        short_worst = min(-(px(t) / p0 - 1) for t in path if px(t))
         long_worst = min(price_at(f1, t) / a0 - 1 for t in path if price_at(f1, t))
         rows.append({
             "roll": label, "contracts": f"{f1c}->{f2c}",
