@@ -40,3 +40,17 @@ Veranta and XStable are not wired in yet. Check their prices and rates in the ap
 - Extended's own roll table lists WTI's Oct 2026 roll as `V6 -> X6`, which looks like a typo for `X6 -> Z6`. Its WTI price currently matches Nov (X6). Confirm with Extended before relying on the two venues rolling in sync.
 - Both venues restrict access from some jurisdictions.
 - Nothing here is risk-free. Legs can be liquidated before prices converge, oracles can fail, and funding can move against you.
+
+## Backtests
+
+`backtests/` holds backtests for the four ideas, on Extended data bundled in `data/`. Results and caveats are in [`backtests/RESULTS.md`](backtests/RESULTS.md).
+
+```bash
+cd backtests
+python roll.py        # 1. oil roll capture (add --hl after refreshing HL data)
+python weekend.py     # 2. weekend convergence
+python mm.py          # 3. market-making fill simulation
+python paxg.py        # 4. PAXG vs XAU
+python refresh_data.py --hl   # extend the data and add trade[XYZ] (needs internet)
+python -m pytest -q
+```
