@@ -23,11 +23,15 @@ FEES = 2 * (0.00009 + 0.0001)  # taker in and out, both venues
 PAIRS = {"BRENT": ("HL_BRENTOIL", "XBR"), "WTI": ("HL_CL", "WTI"), "GOLD": ("HL_GOLD", "XAU")}
 
 
-def hold(hl_name: str, ext_name: str, ext_kind: str = "trades") -> dict:
-    hl, ext = candles(hl_name, "trades"), candles(ext_name, ext_kind)
+def hold(hl_name: str, ext_name: str, ext_kind: str = "trades", hl_kind: str = "trades",
+         fees: float = FEES, start: int | None = None) -> dict:
+    """Short `hl_name`, long `ext_name` (any two venues' files) held start -> end of data."""
+    hl, ext = candles(hl_name, hl_kind), candles(ext_name, ext_kind)
     fh, fe = funding(hl_name), funding(ext_name)
-    t0 = max(min(ext) + 2 * HOUR_MS, min(fe) + 2 * HOUR_MS, et_ms(2026, 6, 5, 12))
-    t1 = (max(ext) // HOUR_MS) * HOUR_MS - HOUR_MS
+    t0 = max(min(hl) + 2 * HOUR_MS, min(ext) + 2 * HOUR_MS, min(fh) + 2 * HOUR_MS, min(fe) + 2 * HOUR_MS,
+             start or et_ms(2026, 6, 5, 12))
+    t0 = t0 // HOUR_MS * HOUR_MS
+    t1 = (min(max(ext), max(hl), max(fh), max(fe)) // HOUR_MS) * HOUR_MS - HOUR_MS
     h0, e0, h1, e1 = price_at(hl, t0), price_at(ext, t0), price_at(hl, t1), price_at(ext, t1)
     worst = 0.0
     for t in range(t0, t1, HOUR_MS):
@@ -38,7 +42,7 @@ def hold(hl_name: str, ext_name: str, ext_kind: str = "trades") -> dict:
     fund = sum(fh.get(h, 0.0) - fe.get(h, 0.0) for h in range(t0 // HOUR_MS * HOUR_MS + HOUR_MS, t1, HOUR_MS))
     days = (t1 - t0) / 86_400_000
     return {"t0": et(t0), "t1": et(t1), "days": days, "price": price, "funding": fund,
-            "net": price + fund - FEES, "worst": worst}
+            "net": price + fund - fees, "worst": worst}
 
 
 def weekly(hl_name: str, ext_name: str) -> list[float]:

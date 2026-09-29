@@ -258,3 +258,87 @@ Also checked:
   contract, and the Pyth trial key lacks NG contracts.
 - **Offline or empty markets:** trade[XYZ] wheat, corn, TTF, uranium and
   aluminium show zero open interest.
+
+## 6. Cross-venue funding scan: Lighter and Aster added (`funding_scan.py`)
+
+Every commodity × venue pair with hourly funding on trade[XYZ] (HL),
+Extended (EXT), Lighter (LT) and Aster (AS, 4h funding spread over its 4
+hours). "Short A / long B" earns f_A − f_B.
+
+Sign check: Lighter's daily-average premium to HL correlates positively with
+the funding difference (+0.26), consistent with "direction: long = longs pay".
+
+Ranked by t-stat of weekly sums (`python funding_scan.py`):
+
+| Commodity | Short / long | Period | Weeks positive | Mean/wk | ~Annual | t |
+|---|---|---|---|---|---|---|
+| Brent | HL / AS | 20 May–29 Sep | 17/18 | +0.15% | +7.7% | 4.8 |
+| Brent | LT / AS | 27 Jun–28 Sep | 13/13 | +0.32% | +16.4% | 4.3 |
+| Brent | HL / EXT | 26 May–28 Sep | 16/17 | +0.21% | +10.7% | 4.0 |
+| Brent | LT / EXT | 27 Jun–28 Sep | 12/13 | +0.37% | +19.0% | 3.2 |
+| WTI | LT / EXT | 27 Jun–28 Sep | 12/13 | +0.25% | +13.0% | 2.9 |
+| WTI | LT / HL | 27 Jun–28 Sep | 12/13 | +0.21% | +10.7% | 2.3 |
+
+Gold, silver and natgas: nothing with t > 2 (gold HL/EXT +1.8%/yr, t = 1.7).
+
+### Continuous hold with real prices on both legs (`python funding_scan.py --hold`)
+
+The table assumes short/long from 29 Jun to 28–29 Sep (91 days), 4 taker fills,
+and $1,000 split across the two venues at 3x per leg ($1,500 notional each).
+
+| Pair | Price legs | Funding | Net | Per year | Worst interim | $1,000 → |
+|---|---|---|---|---|---|---|
+| Brent short LT / long EXT | +0.04% | +4.75% | **+4.76%** | +19.1% | −1.95% | **$1,071.45** |
+| Brent short LT / long AS | +0.25% | +4.10% | +4.28% | +17.1% | −1.36% | $1,064.19 |
+| WTI short LT / long EXT | +0.01% | +3.28% | +3.27% | +13.1% | −0.86% | $1,049.00 |
+| WTI short LT / long HL | +0.18% | +2.66% | +2.83% | +11.3% | −0.16% | $1,042.43 |
+| Brent short LT / long HL | +0.11% | +2.02% | +2.11% | +8.5% | −0.31% | $1,031.71 |
+| Brent short HL / long EXT | −0.08% | +2.73% | +2.61% | +10.5% | −1.99% | $1,039.20 |
+| Brent short HL / long AS | +0.07% | +2.09% | +2.07% | +8.3% | −1.45% | $1,031.11 |
+
+Fees per fill: Lighter 0% (standard account), HL 0.009%, Extended 0.01%,
+Aster 0.035%.
+- **Prices:** Extended and Aster legs use mark prices, since Aster's Brent
+  book has no trade in 38% of hours. The HL and Lighter legs use last trades.
+- **Lighter (liquid):** $0.2–0.8M traded per hour, so it is easy to fill.
+- **Aster:** spread ~5 bps, and a $1,500 order fits in the top 2–3 levels,
+  costing ~0.1% extra per round trip, which the table does not include.
+- **Price risk:** the price legs cancel well. The worst interim basis loss is
+  under 2% of notional on every pair, and under 0.35% for LT/HL.
+
+### The catch: the Lighter edge is a regime, not a constant
+
+Funding difference by month:
+
+| Pair | Jun (from 27th) | Jul | Aug | Sep |
+|---|---|---|---|---|
+| Brent LT / EXT | +0.09% | +0.69% | +1.91% | +2.08% |
+| Brent LT / HL | −0.02% | −0.08% | +1.40% | +0.70% |
+| WTI LT / EXT | +0.11% | +0.47% | +1.08% | +1.63% |
+| WTI LT / HL | +0.02% | +0.13% | +0.82% | +1.68% |
+| Brent HL / EXT (reference) | +0.89% | +0.75% | +0.51% | +1.39% |
+
+- **July:** all oil perps had near-zero funding, and short Lighter earned
+  nothing against HL.
+- **Aug–Sep:** oil perps traded at a discount and funding went strongly
+  negative (Brent: HL −58%/yr, Extended −77%/yr in Sep). Lighter's went less
+  negative (−50%/yr), and that gap is the whole Lighter edge. So short Lighter
+  pays well only while funding is deeply negative. If the market flips back
+  to flat or positive funding, expect it to shrink to ~0.
+- **HL / EXT Brent (section 5) is the steadiest:** positive every month since
+  May, because its cause (trade[XYZ]'s 0.5 multiplier plus Extended's thin,
+  discounted book) does not depend on the funding regime.
+
+A practical way to run it:
+- **Core leg:** long Extended Brent, which receives the most negative funding.
+- **Short side:** switch between trade[XYZ] and Lighter, whichever currently
+  has the higher (less negative) funding, re-checked weekly. Switching the
+  short leg costs ~0.02% per switch.
+- **Exit:** if the chosen pair's weekly differential is negative 2–3 weeks
+  running.
+
+Data limits:
+- Lighter funding is only available from 27 Jun.
+- Aster WTI/XAG funding stops early (6 Sep / 14 Sep).
+- Aster gold (XAUUSD) returned no history.
+- Copper was not scanned on Lighter or Aster.
