@@ -54,6 +54,37 @@ What the data shows:
   funding and discount win, and it loses.
 - **Oct-26 qualifies:** WTI X6–Z6 ≈ $3.70 (4.0%), Brent Z6–F7 ≈ $3.75 (3.8%).
   Window 7 Oct 17:30 ET → 13 Oct.
+### Perps-only version: hedge on Veranta instead of CME (`python roll.py --hl --hedge=veranta`)
+
+Veranta (ex-Avantis) prices the front contract off Pyth until expiry, then
+rolls with an entry-price adjustment, so it still holds the November contract
+while trade[XYZ] rolls to December. It is closed 18:00–20:00 ET daily, so both
+legs close at 20:00 ET on the last day. It has no public price history, so it
+is modelled from its published parameters:
+- **Hedge price:** equal to the front-month contract, per its Pyth feed.
+- **Fees:** docs say zero commission on commodities in growth mode, with a
+  0.06% spread paid in and out. The API shows a 0.10% open fee on top, so both
+  cases are run.
+- **Holding cost:** 0.0002853% per hour for a long, about 2.5%/yr.
+
+Rolls with a spread > 2% only (Aug + Sep, WTI + Brent), 1h entry:
+
+| Hedge leg | Costs per round trip (both legs) | Avg net per roll | Positive |
+|---|---|---|---|
+| CME micro WTI | ~0.06% | +1.17% | 4/4 |
+| Veranta, docs fees | ~0.18% | **+1.04%** | 4/4 |
+| Veranta, API fees | ~0.28% | **+0.94%** | 4/4 |
+
+Per roll with Veranta (docs fees): WTI Aug +1.21%, WTI Sep +1.16%,
+Brent Aug +1.20%, Brent Sep +0.58%. Rolls with a small spread (Jun/Jul) lose
+0.3–2.1%, so the filter matters even more with Veranta's higher costs.
+
+The perps-only version rests on two assumptions the data can't check:
+- **Veranta fills near its Pyth price.**
+- **Its pool accepts the size.** WTI open interest there was ~$51K.
+
+Treat it as a small-size strategy until live fills confirm both.
+
 - **Caveat:** that's 4 profitable observations, in 2 months, from 2 correlated
   markets. The spread estimate carries ±1.2–1.6% noise per roll. Size small
   and log every fill.

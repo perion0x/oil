@@ -44,8 +44,20 @@ CONTRACTS = {
     "XBR": {"Jun-26": "Q6->U6", "Jul-26": "U6->V6", "Aug-26": "V6->X6", "Sep-26": "X6->Z6"},
 }
 STEP_FROM, STEP_TO = 17, 19   # measure each step from 17:00 to 19:00 ET
-ENTRY_LEADS_H = (1, 24, 72)   # enter this many hours before the first step
-FEES = 2 * 0.0001 + 2 * 0.0002  # perp taker in/out (Extended) + ~2bp per side for the CME leg
+ENTRY_LEADS_H = (1, 24, 72)
+MIN_SPREAD = 0.02             # trading rule: only take rolls with a front-next spread above this   # enter this many hours before the first step
+PERP_FEE = {"ext": 0.0001, "hl": 0.00009}  # taker, per side
+# Long front-month hedge legs. Veranta (ex-Avantis) prices the front contract
+# off Pyth until expiry, then rolls PnL-neutrally, so it holds F1 through the
+# trade[XYZ] window. It is closed 18:00-20:00 ET daily, so the hedge can only
+# be closed at 20:00 ET. Its fees are uncertain: docs say zero commission on
+# commodities in growth mode (spread only), its API shows 0.10% open + 0.06%.
+HEDGES = {
+    "cme":         {"label": "CME micro WTI",           "cost": 2 * 0.0002,          "hold_h": 0.0,      "exit_hour": 19},
+    "veranta":     {"label": "Veranta (docs: spread only)", "cost": 2 * 0.0006,      "hold_h": 2.853e-6, "exit_hour": 20},
+    "veranta_api": {"label": "Veranta (API: 0.10% fee + spread)", "cost": 0.0010 + 2 * 0.0006, "hold_h": 2.853e-6, "exit_hour": 20},
+}
+FEES = 2 * PERP_FEE["ext"] + HEDGES["cme"]["cost"]  # default case: Extended perp + CME hedge
 
 
 def step_windows(days):
@@ -84,7 +96,8 @@ def perp_data(market: str, venue: str):
     raise FileNotFoundError(f"no Hyperliquid data for {market}; run refresh_data.py --hl")
 
 
-def run(market: str, lead_h: int = 1, venue: str = "ext") -> list[dict]:
+def run(market: str, lead_h: int = 1, venue: str = "ext", hedge: str = "cme") -> list[dict]:
+    hg = HEDGES[hedge]
     index = candles(market, "index")
     trades, fund = perp_data(market, venue)
     roll_days = {d for days in ROLLS.values() for d in days}
@@ -100,7 +113,8 @@ def run(market: str, lead_h: int = 1, venue: str = "ext") -> list[dict]:
         step_moves = [(price_at(index, b) - price_at(index, a) * (1 + mu)) / base for a, b in win]
         spread = -sum(step_moves)                     # fraction of price
         noise = sd * len(win) ** 0.5
-        entry, exit_ = win[0][0] - lead_h * HOUR_MS, win[-1][1]
+        y, m, d = days[-1]
+        entry, exit_ = win[0][0] - lead_h * HOUR_MS, et_ms(y, m, d, hg["exit_hour"])
         if None in (price_at(trades, entry), price_at(index, entry)):
             continue  # entry falls before the data starts
         prem = lambda t: price_at(trades, t) / price_at(index, t) - 1
@@ -117,7 +131,9 @@ def run(market: str, lead_h: int = 1, venue: str = "ext") -> list[dict]:
             "market": market if venue == "ext" else f"{market}@HL", "roll": label, "contracts": CONTRACTS[market][label], "lead_h": lead_h,
             "spread": spread, "noise": noise, "funding": fund_recv, "premium": prem_in - prem_out,
             "funding_hours": len(f), "hours": len(hours),
-            "net": spread + fund_recv + prem_in - prem_out - FEES, "per_step": per_step,
+            "costs": 2 * PERP_FEE[venue] + hg["cost"] + hg["hold_h"] * len(hours),
+            "net": spread + fund_recv + prem_in - prem_out - (2 * PERP_FEE[venue] + hg["cost"] + hg["hold_h"] * len(hours)),
+            "per_step": per_step,
         })
     return rows
 
@@ -129,10 +145,14 @@ def report(rows: list[dict], per_step: bool = True) -> None:
         gap = "" if r["funding_hours"] == r["hours"] else f"  ({r['funding_hours']}/{r['hours']}h funding data)"
         print(f"{r['market']:6} {r['roll']:7} {r['contracts']:9} "
               f"{fmt_pct(r['spread']):>8} +/-{r['noise'] * 100:.2f}% "
-              f"{fmt_pct(r['funding']):>9} {fmt_pct(r['premium']):>8} {fmt_pct(-FEES):>7} "
+              f"{fmt_pct(r['funding']):>9} {fmt_pct(r['premium']):>8} {fmt_pct(-r['costs']):>7} "
               f"{fmt_pct(r['net']):>8}{gap}")
     nets = [r["net"] for r in rows]
     print(f"average net per roll: {fmt_pct(st.mean(nets))}   positive in {sum(n > 0 for n in nets)}/{len(nets)}")
+    big = [r["net"] for r in rows if r["spread"] > MIN_SPREAD]
+    if big:
+        print(f"only rolls with spread > {MIN_SPREAD:.0%}: average {fmt_pct(st.mean(big))}, "
+              f"positive in {sum(n > 0 for n in big)}/{len(big)}")
     if per_step:
         print("\nper-step view (index step gain / funding paid in the 24h before it):")
         for r in rows:
@@ -143,10 +163,11 @@ def report(rows: list[dict], per_step: bool = True) -> None:
 if __name__ == "__main__":
     import sys
     venue = "hl" if "--hl" in sys.argv else "ext"
-    print(f"perp venue: {'trade[XYZ] on Hyperliquid' if venue == 'hl' else 'Extended'}")
+    hedge = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--hedge=")), "cme")
+    print(f"perp venue: {'trade[XYZ] on Hyperliquid' if venue == 'hl' else 'Extended'} | hedge: {HEDGES[hedge]['label']}")
     try:
         for i, lead in enumerate(ENTRY_LEADS_H):
             print(f"\n=== short perp + long front month, entry {lead}h before first step, exit after last step ===")
-            report(run("WTI", lead, venue) + run("XBR", lead, venue), per_step=(i == len(ENTRY_LEADS_H) - 1))
+            report(run("WTI", lead, venue, hedge) + run("XBR", lead, venue, hedge), per_step=(i == len(ENTRY_LEADS_H) - 1))
     except FileNotFoundError as e:
         sys.exit(str(e))
