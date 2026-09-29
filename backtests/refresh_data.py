@@ -22,7 +22,7 @@ HL = "https://api.hyperliquid.xyz/info"
 UA = {"User-Agent": "Mozilla/5.0 (oil-backtests)"}
 HOUR_MS = 3_600_000
 EXT_MARKETS = ("WTI-USD", "XBR-USD", "XAU-USD", "PAXG-USD")
-HL_COINS = ("xyz:WTIOIL", "xyz:CL", "xyz:BRENTOIL", "xyz:GOLD")
+HL_COINS = ("xyz:CL", "xyz:BRENTOIL", "xyz:GOLD")  # WTI is listed as xyz:CL
 
 
 def save(name: str, rows: list[dict]) -> None:
@@ -59,6 +59,8 @@ def refresh_extended(start: int, end: int) -> None:
 
 def hl_post(body: dict):
     r = requests.post(HL, json=body, timeout=30)
+    if r.status_code >= 500:
+        return None  # HL answers 500 for unknown coins
     r.raise_for_status()
     return r.json()
 

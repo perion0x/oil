@@ -68,7 +68,7 @@ def baseline(index: dict[int, float], roll_days: set) -> tuple[float, float]:
     return st.mean(moves), st.pstdev(moves)
 
 
-HL_NAMES = {"WTI": ("HL_WTIOIL", "HL_CL"), "XBR": ("HL_BRENTOIL",)}
+HL_NAMES = {"WTI": ("HL_CL", "HL_WTIOIL"), "XBR": ("HL_BRENTOIL",)}
 
 
 def perp_data(market: str, venue: str):

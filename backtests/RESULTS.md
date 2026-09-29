@@ -1,13 +1,14 @@
 # Backtest results (data to 28 Sep 2026)
 
-All data is Extended's public API (hourly Jun–Sep 2026, minute data 22–28 Sep).
-Hyperliquid/trade[XYZ] could not be reached from the build environment; rerun
-with `python refresh_data.py --hl && python roll.py --hl` to test it.
+Data: Extended's public API (hourly Jun–Sep 2026, minute data 22–28 Sep) and
+trade[XYZ] on Hyperliquid (hourly candles and funding, May–Sep 2026; WTI is
+`xyz:CL`). Roll spreads are estimated from Extended's index, which references
+the same contracts on the same schedule as trade[XYZ].
 
 | Idea | Verdict on Extended data | Why |
 |---|---|---|
-| 1. Oil roll capture | **Breakeven on average; WTI in steep-backwardation months looked positive** | Funding plus the perp's pre-step discount absorbed 40–100% of the roll spread |
-| 2. Weekend convergence | **Oil: little left to converge. Gold: needs a second venue to test** | Extended oil prices in ~86–89% of the weekend move by Sun 17:00 ET; Extended gold only ~14% |
+| 1. Oil roll capture | **Positive only when the curve is steeply backwardated: ~+0.8% to +1.4% per roll on trade[XYZ] (4/4 in Aug–Sep)**; loses when the spread is small | Funding plus the perp's pre-step discount absorb most, not all, of the spread |
+| 2. Weekend convergence | **Brent small positive (+0.2%/weekend), WTI ~0, gold no** | Both venues price 86–93% of oil's weekend move; both price only 14–20% of gold's, so neither leads |
 | 3. Market making | **No edge in a rough 1-minute simulation** | Adverse selection ≈ the quoted spread; needs forward paper-trading at real speed |
 | 4. PAXG vs XAU | **Loses after realistic costs** | Fair-value spread sd ≈ 12bp < ~14bp round-trip cost; apparent profits on trade prices were bid/ask bounce |
 
@@ -36,9 +37,26 @@ What the data shows:
 - **Entry timing matters less than expected.** Entering 1h early pays the
   pre-step discount. Entering 24–72h early mostly swaps that for extra funding.
 
-Next check: the same test on trade[XYZ] (funding multiplier 0.5, a different
-book). If WTI there keeps more than about 1% per roll after funding, idea 1 is
-real at size.
+### Same test with trade[XYZ] as the short (`python roll.py --hl`)
+
+| Roll | Spread est. | WTI net (1h / 24h / 72h entry) | Brent net (1h / 24h / 72h) |
+|---|---|---|---|
+| Jun-26 | ~0% | −1.3 / −1.4 / n/a | −1.9 / −1.7 / n/a |
+| Jul-26 | ~0–1% | −0.2 / −0.1 / +0.0 | +0.4 / +0.4 / +0.6 |
+| Aug-26 | 2.5–3.3% | **+1.3 / +1.2 / +1.3** | **+1.3 / +1.0 / +1.1** |
+| Sep-26 | ~5% | **+1.3 / +1.4 / +1.3** | **+0.8 / +0.9 / +0.9** |
+
+- **trade[XYZ] keeps more of the spread than Extended**, especially on Brent,
+  where Extended kept ~0–0.9% vs trade[XYZ]'s 0.8–1.3%.
+- **Rule that falls out:** trade the roll only when the front–next spread is
+  above ~2% (visible on CME/ICE before the window). Then all 4 trades were
+  positive, averaging **~+1.2% of hedged notional per roll**. Below that the
+  funding and discount win, and it loses.
+- **Oct-26 qualifies:** WTI X6–Z6 ≈ $3.70 (4.0%), Brent Z6–F7 ≈ $3.75 (3.8%).
+  Window 7 Oct 17:30 ET → 13 Oct.
+- **Caveat:** that's 4 profitable observations, in 2 months, from 2 correlated
+  markets. The spread estimate carries ±1.2–1.6% noise per roll. Size small
+  and log every fill.
 
 ## 2. Weekend convergence (`weekend.py`)
 
@@ -51,13 +69,26 @@ reopened (median absolute gap).
 | Brent | 1.27% | 1.02% | 0.64% | 89% |
 | Gold | 0.44% | 0.57% | 0.47% | **14%** |
 
-- **Oil:** Extended's weekend oil price is informative. Any cross-venue gap has
-  to come from the *other* venue lagging. The two-venue backtest
-  (`pair_backtest`) is ready for HL data.
-- **Gold:** Extended's weekend gold barely moves, so it reopens near a stale
-  Friday price. If trade[XYZ] GOLD prices the weekend well (it is the main
-  weekend venue), short or long Extended XAU against HL GOLD on Sunday afternoon
-  is the candidate trade. The first test to run once HL data is available.
+trade[XYZ] priced 93% (WTI), 91% (Brent) and 20% (gold) of the weekend move
+by Sunday 17:00. That's close to Extended, so neither venue leads the other.
+
+Two-venue backtest. The signal is the weekend gap, the fill comes one hour
+later, the exit is Sunday 19:00 ET, and fees are included:
+
+| Market | Extended priced on | Gap > 0.2% | Gap > 0.5% | Gap > 1% |
+|---|---|---|---|---|
+| WTI | last trade | 3 wknds, +0.06% avg | none | none |
+| WTI | mark | 17, −0.01% | 10, +0.11% | 3, −0.08% |
+| Brent | last trade | **10, +0.23%, 10/10 win** | 2, +0.47% | 1, −0.01% |
+| Brent | mark | **17, +0.23%, 13/17** | 12, +0.06% | 5, +0.40% |
+| Gold | either | 1–3, −0.1% | none | none |
+
+- **Gold is dead.** Neither venue prices the weekend, and trade[XYZ]'s 0.09%
+  gold fee kills any gap.
+- **Brent is the only candidate**, at about +0.2% per weekend on small size
+  (Extended caps oil positions at $1M, and its Brent book is thin). Hourly
+  last-trade and mark prices are both imperfect stand-ins for executable
+  prices, so confirm with the live monitor's bid/ask log before trading it.
 
 ## 3. Market making (`mm.py`)
 
