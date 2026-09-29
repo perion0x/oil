@@ -10,6 +10,7 @@ the same contracts on the same schedule as trade[XYZ].
 | 1. Oil roll capture | **No reliable edge. Real contract prices, 8 WTI rolls: +0.18% avg, t-stat 0.5, worst −2.0%, and one near-liquidation at 3x** | Funding plus the perp's pre-step discount price the roll in; big spreads come with big funding |
 | 2. Weekend convergence | **Brent small positive (+0.2%/weekend), WTI ~0, gold no** | Both venues price 86–93% of oil's weekend move; both price only 14–20% of gold's, so neither leads |
 | 3. Market making | **No edge in a rough 1-minute simulation** | Adverse selection ≈ the quoted spread; needs forward paper-trading at real speed |
+| **5. Brent venue-funding pair** (`funding_pair.py`) | **Best result: short trade[XYZ] / long Extended Brent earned +3.0–3.3% net over 115 days (~10%/yr on notional), 16 of 17 weeks positive (t=4.0)** | Extended's thin Brent book trades at a persistent discount, so its longs are paid more than trade[XYZ]'s shorts pay (trade[XYZ] halves funding) |
 | 4. PAXG vs XAU | **Loses after realistic costs** | Fair-value spread sd ≈ 12bp < ~14bp round-trip cost; apparent profits on trade prices were bid/ask bounce |
 
 ## Update: real contract prices (Pyth), 8 WTI rolls, $1,000 account (`roll_direct.py`)
@@ -205,3 +206,55 @@ On mark prices: mean −16.5bp, standard deviation 12.3bp. Mean reversion
 **both lose** after 4bp of fees plus an assumed 10bp of spread. On last-trade
 prices the same rules showed 57/57 winners, which is bid/ask bounce on a thin
 book, not an edge. Don't trade it.
+
+## 5. Venue-funding pair: short trade[XYZ] / long Extended (`funding_pair.py`, `roll_pair.py`)
+
+Found while widening the search. Every major venue (trade[XYZ], Extended,
+Variational, Lighter, OKX, Binance, Bybit) now rolls oil on the same
+5th–9th business day blend, so there is no roll-timing mismatch left between
+them (see loris.tools/rwa/roll-calendar). What does differ is **funding**:
+- **trade[XYZ]** multiplies funding by 0.5.
+- **Extended's Brent book is thin** (~$1M open interest), and its perp trades
+  at a persistent discount, so its funding stays more negative.
+
+Holding a short on trade[XYZ] and a long on Extended on the same commodity
+cancels the price (both track the same contract and roll) and collects the
+difference.
+
+| Commodity | Hold | Price legs | Funding | Net (after 4 taker fills) | Weekly funding diff |
+|---|---|---|---|---|---|
+| **Brent** | 5 Jun → 28 Sep | −0.16% (last trade) / −0.37% (mark) | **+3.45%** | **+3.25% / +3.04%** | **16/17 weeks positive, mean +0.21%/wk, t = 4.0** |
+| WTI | 5 Jun → 28 Sep | −0.18% / −0.56% | +0.70% | +0.49% / +0.11% | 11/17, t = 0.8 |
+| Gold | 7 Jul → 28 Sep | +0.09% / +0.06% | +0.41% | +0.46% / +0.43% | 7/11, t = 1.7 |
+
+- **Brent is the first result here that is statistically meaningful.**
+  $1,000 split across the venues at 3x per leg ($1,500 notional each) went to
+  **$1,045.54–$1,048.72** in ~4 months, about **13–15% a year on capital**.
+- **Price risk is small but not zero.** The worst interim loss on the price
+  legs was −1.4% to −1.9% of notional, from basis swings between venues. Each
+  leg still carries the full Brent move against its own venue's margin: a 10%
+  Brent move is ~30% of one leg's margin at 3x, and the margins can't be
+  netted.
+- **Roll windows only** (`roll_pair.py`): Brent +0.07/+0.32/+0.41/+0.52% per
+  roll (Jun–Sep). About half the year's differential comes from outside roll
+  windows, so a continuous hold is simpler.
+
+What would end it:
+- **Market makers deepen Extended's Brent book.** The discount and the funding
+  gap would shrink.
+- **Either venue changes its funding formula.**
+- **Size:** Extended caps oil positions at $1M, and the book is thin. Fine
+  at $1–10k, not at fund scale.
+- **Venue risk** on both platforms.
+
+This is a funding trade, which you wanted to avoid because rates move. The
+difference here is a structural cause (the funding multiplier and the thin
+book), and 16/17 positive weeks. Watch the weekly differential and exit if
+it turns negative for 2–3 weeks.
+
+Also checked:
+- **Natural gas and copper on trade[XYZ]:** $7.7M and $12M open interest. The
+  roll trade can't be hedged there: no on-chain venue holds the front natgas
+  contract, and the Pyth trial key lacks NG contracts.
+- **Offline or empty markets:** trade[XYZ] wheat, corn, TTF, uranium and
+  aluminium show zero open interest.
