@@ -1,0 +1,11 @@
+{"_note": "Kalshi KXHORMUZNORM (7-day MA of IMF PortWatch Hormuz transit calls ABOVE 60 before date). yes bid/ask with sizes, snapshot 2026-09-29.",
+ "markets": [
+  {"ticker": "KXHORMUZNORM-26MAR17-B261001", "before": "2026-10-01", "yes_bid": 0.00, "yes_bid_size": 0, "yes_ask": 0.01, "yes_ask_size": 118778.12},
+  {"ticker": "KXHORMUZNORM-26MAR17-B261101", "before": "2026-11-01", "yes_bid": 0.03, "yes_bid_size": 39777.92, "yes_ask": 0.05, "yes_ask_size": 21947.66},
+  {"ticker": "KXHORMUZNORM-26MAR17-B261201", "before": "2026-12-01", "yes_bid": 0.09, "yes_bid_size": 34.0, "yes_ask": 0.10, "yes_ask_size": 1546.47},
+  {"ticker": "KXHORMUZNORM-26MAR17-B270101", "before": "2027-01-01", "yes_bid": 0.18, "yes_bid_size": 10313.9, "yes_ask": 0.20, "yes_ask_size": 21001.0},
+  {"ticker": "KXHORMUZNORM-26MAR17-B270401", "before": "2027-04-01", "yes_bid": 0.34, "yes_bid_size": 1064.0, "yes_ask": 0.36, "yes_ask_size": 1605.96},
+  {"ticker": "KXHORMUZNORM-26MAR17-B270701", "before": "2027-07-01", "yes_bid": 0.48, "yes_bid_size": 61.98, "yes_ask": 0.50, "yes_ask_size": 3.0},
+  {"ticker": "KXHORMUZNORM-26MAR17-B280101", "before": "2028-01-01", "yes_bid": 0.56, "yes_bid_size": 12.37, "yes_ask": 0.59, "yes_ask_size": 1055.0},
+  {"ticker": "KXHORMUZNORM-26MAR17-B280701", "before": "2028-07-01", "yes_bid": 0.66, "yes_bid_size": 555.01, "yes_ask": 0.70, "yes_ask_size": 14.65},
+  {"ticker": "KXHORMUZNORM-26MAR17-B290101", "before": "2029-01-01", "yes_bid": 0.70, "yes_bid_size": 1274.01, "yes_ask": 0.72, "yes_ask_size": 3.0}]}
