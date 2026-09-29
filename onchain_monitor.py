@@ -2,12 +2,14 @@
 
 Tracks two trade setups:
 
-1. Cross-venue convergence (Hyperliquid xyz vs Extended).
-   Both venues reference the same underlying (and, for oil, the same futures
-   contract with the same 5-day roll). When they diverge, the gap should close
-   once both oracles are back on external pricing. Off-hours (weekends), each
-   venue prices from its own order book, so gaps can open wide and then snap
-   shut at the Sunday reopen.
+1. Cross-venue convergence (Hyperliquid xyz, Extended, Variational Omni).
+   All three reference the same underlying (and, for oil, the same futures
+   contract with the same 5th-9th business day roll). When they diverge, the gap
+   should close once the oracles are back on external pricing. Off-hours
+   (weekends), each venue prices from its own order book with different
+   smoothing and bands, so gaps can open wide and then snap shut at the Sunday
+   reopen. Edges are measured on executable prices (sell the rich venue's bid,
+   buy the cheap venue's ask) net of taker fees.
 
 2. Roll-yield capture (Hyperliquid oil perp vs a PnL-neutral front-month leg).
    trade[XYZ] rolls WTIOIL / BRENTOIL from front to next month over 5 business
@@ -26,6 +28,7 @@ import argparse
 import csv
 import datetime as dt
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -36,22 +39,30 @@ import requests
 ET = ZoneInfo("America/New_York")
 HL_URL = "https://api.hyperliquid.xyz/info"
 EXT_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
+VAR_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 UA = {"User-Agent": "Mozilla/5.0 (onchain-monitor)"}
+VENUES = ("hl", "ext", "var")
 
 # Taker fees (fraction of notional), base tier, as documented Sep 2026.
 # HL xyz gold is excluded from growth mode, so it pays the full HIP-3 rate.
+# Variational charges no fee; its cost is the quoted spread, already in bid/ask.
 FEES = {
     "hl": {"WTI": 0.00009, "BRENT": 0.00009, "GOLD": 0.0009},
     "ext": {"WTI": 0.0001, "BRENT": 0.0001, "GOLD": 0.0001},
+    "var": {"WTI": 0.0, "BRENT": 0.0, "GOLD": 0.0},
 }
 
-# asset -> (hyperliquid coin, extended market)
+# asset -> venue -> candidate symbols (first one found wins). trade[XYZ] has
+# listed WTI as both WTIOIL and CL.
 ASSETS = {
-    "WTI": ("xyz:WTIOIL", "WTI-USD"),
-    "BRENT": ("xyz:BRENTOIL", "XBR-USD"),
-    "GOLD": ("xyz:GOLD", "XAU-USD"),
+    "WTI": {"hl": ["xyz:WTIOIL", "xyz:CL"], "ext": ["WTI-USD"], "var": ["CL"]},
+    "BRENT": {"hl": ["xyz:BRENTOIL"], "ext": ["XBR-USD"], "var": ["BZ"]},
+    "GOLD": {"hl": ["xyz:GOLD"], "ext": ["XAU-USD"], "var": ["XAU"]},
 }
+
+# Variational bid/ask quotes may be cached for up to 600s; skip older ones.
+MAX_QUOTE_AGE_S = 600
 
 # trade[XYZ] roll schedule (docs.trade.xyz roll-schedules). Each window starts
 # at 17:30 ET on the given date; weights step 20% per business day over 5 steps.
@@ -85,6 +96,7 @@ class Quote:
     bid: float | None = None
     ask: float | None = None
     funding_1h: float | None = None  # fraction per hour, positive = longs pay
+    quote_age_s: float | None = None  # age of bid/ask when the venue reports it
 
 
 @dataclass
@@ -152,6 +164,38 @@ def fetch_ext() -> dict[str, Quote]:
     r.raise_for_status()
     return parse_ext(r.json())
 
+def parse_var(payload, now: dt.datetime | None = None) -> dict[str, Quote]:
+    """Variational Omni /metadata/stats. Uses the $100k quote as the executable
+    price; drops bid/ask older than MAX_QUOTE_AGE_S (the API caches up to 600s)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out = {}
+    for row in payload.get("listings", []):
+        quotes = row.get("quotes") or {}
+        q = quotes.get("size_100k") or quotes.get("size_1k") or quotes.get("base") or {}
+        age = None
+        if quotes.get("updated_at"):
+            # Trim nanoseconds so fromisoformat accepts it.
+            ts = re.sub(r"(\.\d{6})\d*", r"\1", quotes["updated_at"]).replace("Z", "+00:00")
+            age = (now - dt.datetime.fromisoformat(ts)).total_seconds()
+        fresh = age is not None and age <= MAX_QUOTE_AGE_S
+        # funding_rate is an annualised decimal (e.g. BTC 0.037 at an 8h interval).
+        rate = _f(row.get("funding_rate"))
+        out[row["ticker"]] = Quote(
+            "var",
+            mark=_f(row.get("mark_price")),
+            bid=_f(q.get("bid")) if fresh else None,
+            ask=_f(q.get("ask")) if fresh else None,
+            funding_1h=rate / 8760 if rate is not None else None,
+            quote_age_s=age,
+        )
+    return out
+
+
+def fetch_var() -> dict[str, Quote]:
+    r = requests.get(VAR_URL, headers=UA, timeout=15)
+    r.raise_for_status()
+    return parse_var(r.json())
+
 
 def fetch_future(root: str, contract: str) -> float | None:
     """Last price of a futures contract from Yahoo, e.g. CL + X6 -> CLX26.NYM."""
@@ -201,17 +245,49 @@ def externally_priced(now: dt.datetime) -> bool:
 
 # ---------------------------------------------------------------- signals
 
-def convergence_signal(asset: str, hl: Quote, ext: Quote) -> dict:
-    """Gap between HL and Extended marks, net of taker fees on both legs, in and out."""
-    mid = (hl.mark + ext.mark) / 2
-    gap_bps = (hl.mark - ext.mark) / mid * 1e4
-    fees_bps = 2 * (FEES["hl"][asset] + FEES["ext"][asset]) * 1e4
+def pick(asset: str, venue: str, books: dict[str, dict[str, Quote]]) -> Quote | None:
+    for sym in ASSETS[asset][venue]:
+        q = books.get(venue, {}).get(sym)
+        if q and q.mark:
+            return q
+    return None
+
+
+def pair_signal(asset: str, rich: Quote, cheap: Quote) -> dict:
+    """Edge of short `rich` / long `cheap`, in bps of mid.
+
+    Entry is priced on executable quotes (sell rich's bid, buy cheap's ask) when
+    both venues give them, else on marks. Exit assumes the two converge, costing
+    half of each venue's spread plus taker fees on all four fills."""
+    mid = (rich.mark + cheap.mark) / 2
+    executable = None not in (rich.bid, rich.ask, cheap.bid, cheap.ask)
+    if executable:
+        entry = rich.bid - cheap.ask
+        exit_cost = (rich.ask - rich.bid) / 2 + (cheap.ask - cheap.bid) / 2
+    else:
+        entry, exit_cost = rich.mark - cheap.mark, 0.0
+    fees_bps = 2 * (FEES[rich.venue][asset] + FEES[cheap.venue][asset]) * 1e4
     return {
-        "gap_bps": gap_bps,
+        "pair": f"short {rich.venue.upper()} / long {cheap.venue.upper()}",
+        "gap_bps": (rich.mark - cheap.mark) / mid * 1e4,
+        "entry_bps": entry / mid * 1e4,
+        "exit_cost_bps": exit_cost / mid * 1e4,
         "fees_bps": fees_bps,
-        "net_bps": abs(gap_bps) - fees_bps,
-        "action": "short HL / long EXT" if gap_bps > 0 else "long HL / short EXT",
+        "net_bps": (entry - exit_cost) / mid * 1e4 - fees_bps,
+        "priced_on": "quotes" if executable else "marks",
     }
+
+
+def best_pair(asset: str, quotes: dict[str, Quote]) -> dict | None:
+    """Best net edge over every ordered venue pair."""
+    best = None
+    for a in quotes:
+        for b in quotes:
+            if a != b:
+                sig = pair_signal(asset, quotes[a], quotes[b])
+                if best is None or sig["net_bps"] > best["net_bps"]:
+                    best = sig
+    return best
 
 
 def roll_signal(state: RollState, now: dt.datetime, front_px: float | None,
@@ -248,44 +324,50 @@ def fmt(x, spec=".3f", suffix=""):
 def snapshot(now: dt.datetime | None = None, threshold_bps: float = 5.0) -> list[dict]:
     now = now or dt.datetime.now(ET)
     rows = []
-    try:
-        hl = fetch_hl()
-    except Exception as e:
-        print(f"[warn] Hyperliquid fetch failed: {e}", file=sys.stderr)
-        hl = {}
-    try:
-        ext = fetch_ext()
-    except Exception as e:
-        print(f"[warn] Extended fetch failed: {e}", file=sys.stderr)
-        ext = {}
+    books: dict[str, dict[str, Quote]] = {}
+    for venue, fetch, label in (("hl", fetch_hl, "Hyperliquid"), ("ext", fetch_ext, "Extended"),
+                                ("var", fetch_var, "Variational")):
+        try:
+            books[venue] = fetch()
+        except Exception as e:
+            print(f"[warn] {label} fetch failed: {e}", file=sys.stderr)
+            books[venue] = {}
 
     live = externally_priced(now)
     print(f"\n=== {now:%Y-%m-%d %H:%M:%S %Z}  |  oracles {'LIVE (external)' if live else 'OFF-HOURS (book-driven)'} ===")
-    print(f"{'asset':6} {'HL mark':>10} {'HL fund/h':>10} {'EXT mark':>10} {'EXT fund/h':>11} "
-          f"{'gap bps':>8} {'net bps':>8}  signal")
+    print(f"{'asset':6} {'HL mark':>10} {'EXT mark':>10} {'VAR mark':>10}  {'best pair':24} "
+          f"{'gap':>6} {'net bps':>8}  signal")
 
-    for asset, (hl_coin, ext_mkt) in ASSETS.items():
-        h, e = hl.get(hl_coin), ext.get(ext_mkt)
-        row = {"ts": now.isoformat(), "asset": asset, "live": live,
-               "hl_mark": h and h.mark, "hl_funding_1h": h and h.funding_1h,
-               "ext_mark": e and e.mark, "ext_funding_1h": e and e.funding_1h}
+    for asset in ASSETS:
+        quotes = {v: q for v in VENUES if (q := pick(asset, v, books))}
+        row = {"ts": now.isoformat(), "asset": asset, "live": live}
+        for v in VENUES:
+            q = quotes.get(v)
+            row[f"{v}_mark"] = q and q.mark
+            row[f"{v}_funding_1h"] = q and q.funding_1h
+        best = best_pair(asset, quotes) if len(quotes) >= 2 else None
         sig = ""
-        if h and e and h.mark and e.mark:
-            c = convergence_signal(asset, h, e)
-            row.update(c)
-            if c["net_bps"] > threshold_bps:
-                sig = f"<< {c['action']}  ({'converges now' if live else 'converges at reopen'})"
-        print(f"{asset:6} {fmt(row['hl_mark']):>10} {fmt(row['hl_funding_1h'] and row['hl_funding_1h'] * 100, '.4f', '%'):>10} "
-              f"{fmt(row['ext_mark']):>10} {fmt(row['ext_funding_1h'] and row['ext_funding_1h'] * 100, '.4f', '%'):>11} "
-              f"{fmt(row.get('gap_bps'), '.1f'):>8} {fmt(row.get('net_bps'), '.1f'):>8}  {sig}")
+        if best:
+            row.update(best)
+            if best["net_bps"] > threshold_bps:
+                sig = f"<< {'converges now' if live else 'converges at reopen'}"
+                if best["priced_on"] == "marks":
+                    sig += " (marks only, check book)"
+        print(f"{asset:6} {fmt(row['hl_mark']):>10} {fmt(row['ext_mark']):>10} {fmt(row['var_mark']):>10}  "
+              f"{(best or {}).get('pair', 'n/a'):24} {fmt(row.get('gap_bps'), '.1f'):>6} "
+              f"{fmt(row.get('net_bps'), '.1f'):>8}  {sig}")
         rows.append(row)
+
+    print("\nfunding per hour:", "  ".join(
+        f"{r['asset']} " + "/".join(fmt(r[f'{v}_funding_1h'] and r[f'{v}_funding_1h'] * 100, '.4f', '%') for v in VENUES)
+        for r in rows), "(HL/EXT/VAR)")
 
     print("\n--- roll capture: short HL perp / long front-month (CME or Veranta) ---")
     for asset in ROLLS:
         st = roll_state(asset, now)
         front = fetch_future(YAHOO_ROOT[asset], st.front)
         nxt = fetch_future(YAHOO_ROOT[asset], st.nxt)
-        h = hl.get(ASSETS[asset][0])
+        h = pick(asset, "hl", books)
         r = roll_signal(st, now, front, nxt, h and h.funding_1h)
         print(f"{asset:6} {r['front']}->{r['next']} starts {r['starts']}, next-month weight {r['next_weight']:.0%}")
         if "spread" in r:

@@ -18,6 +18,18 @@ EXT_PAYLOAD = {"status": "OK", "data": [
     {"name": "WTI-USD", "marketStats": {"markPrice": "92.62", "indexPrice": "92.62", "fundingRate": "-0.000037"}},
     {"name": "XBR-USD", "marketStats": {"markPrice": "97.727", "indexPrice": "97.726", "fundingRate": "-0.000005"}},
 ]}
+VAR_PAYLOAD = {"listings": [
+    {"ticker": "CL", "mark_price": "92.70", "funding_rate": "0.0876", "funding_interval_s": 14400,
+     "quotes": {"updated_at": "2026-09-28T16:59:30.123456789Z",
+                "size_1k": {"bid": "92.69", "ask": "92.71"},
+                "size_100k": {"bid": "92.68", "ask": "92.72"}}},
+    {"ticker": "BZ", "mark_price": "98.00", "funding_rate": "0",
+     "quotes": {"updated_at": "2026-09-28T16:00:00Z",  # stale: an hour old
+                "size_100k": {"bid": "97.9", "ask": "98.1"}}},
+    {"ticker": "XAU", "mark_price": "4135.0", "funding_rate": "0",
+     "quotes": {"updated_at": "2026-09-28T16:59:50Z", "size_100k": {"bid": "4134.5", "ask": "4135.5"}}},
+]}
+NOW_UTC = dt.datetime(2026, 9, 28, 17, 0, tzinfo=dt.timezone.utc)
 
 
 def test_parse_hl_and_ext():
@@ -59,13 +71,39 @@ def test_externally_priced_sessions():
     assert m.externally_priced(dt.datetime(2026, 10, 4, 18, 0, tzinfo=ET))       # Sunday reopen
 
 
-def test_convergence_signal_nets_fees():
-    hl = m.Quote("hl", mark=100.10)
-    ext = m.Quote("ext", mark=100.00)
-    c = m.convergence_signal("WTI", hl, ext)
-    assert abs(c["gap_bps"] - 9.995) < 0.01
-    assert abs(c["fees_bps"] - 3.8) < 1e-9  # 2 x (0.9 + 1.0) bps
-    assert c["action"] == "short HL / long EXT"
+def test_parse_var_quotes_and_staleness():
+    v = m.parse_var(VAR_PAYLOAD, now=NOW_UTC)
+    assert (v["CL"].bid, v["CL"].ask) == (92.68, 92.72)  # $100k quote preferred
+    assert abs(v["CL"].funding_1h - 0.0876 / 8760) < 1e-15
+    assert v["BZ"].bid is None and v["BZ"].mark == 98.0  # stale quote dropped
+    assert v["BZ"].quote_age_s == 3600
+
+
+def test_pair_signal_on_quotes():
+    rich = m.Quote("hl", mark=100.10, bid=100.09, ask=100.11)
+    cheap = m.Quote("var", mark=100.00, bid=99.98, ask=100.02)
+    s = m.pair_signal("WTI", rich, cheap)
+    assert s["priced_on"] == "quotes" and s["pair"] == "short HL / long VAR"
+    # entry 100.09 - 100.02 = 0.07; exit 0.01 + 0.02 = 0.03; fees 2 x 0.9bp
+    assert abs(s["net_bps"] - (0.04 / 100.05 * 1e4 - 1.8)) < 1e-9
+
+
+def test_pair_signal_falls_back_to_marks():
+    s = m.pair_signal("WTI", m.Quote("hl", mark=100.10), m.Quote("ext", mark=100.00))
+    assert s["priced_on"] == "marks"
+    assert abs(s["fees_bps"] - 3.8) < 1e-9  # 2 x (0.9 + 1.0) bps
+
+
+def test_best_pair_picks_direction():
+    quotes = {"hl": m.Quote("hl", mark=100.0), "ext": m.Quote("ext", mark=100.5),
+              "var": m.Quote("var", mark=99.8)}
+    assert m.best_pair("WTI", quotes)["pair"] == "short EXT / long VAR"
+
+
+def test_pick_falls_back_to_alternate_symbol():
+    books = {"hl": {"xyz:CL": m.Quote("hl", mark=93.0)}}
+    assert m.pick("WTI", "hl", books).mark == 93.0
+    assert m.pick("BRENT", "hl", books) is None
 
 
 def test_roll_signal_before_window():
@@ -86,17 +124,21 @@ def test_roll_signal_without_prices():
 
 
 def test_snapshot_end_to_end(capsys):
-    hl_resp = mock.Mock(json=lambda: HL_PAYLOAD, raise_for_status=lambda: None)
-    ext_resp = mock.Mock(json=lambda: EXT_PAYLOAD, raise_for_status=lambda: None)
-    futures = {"X6": 92.41, "Z6": 88.71}
-    brent = {"Z6": 98.63, "F7": 94.88}
-    with mock.patch.object(m.requests, "post", return_value=hl_resp), \
-         mock.patch.object(m.requests, "get", return_value=ext_resp), \
-         mock.patch.object(m, "fetch_future",
-                           side_effect=lambda root, c: (futures if root == "CL" else brent)[c]):
+    def resp(payload):
+        return mock.Mock(json=lambda: payload, raise_for_status=lambda: None)
+
+    def fake_get(url, **kw):
+        return resp(VAR_PAYLOAD if url == m.VAR_URL else EXT_PAYLOAD)
+
+    futures = {("CL", "X6"): 92.41, ("CL", "Z6"): 88.71, ("BZ", "Z6"): 98.63, ("BZ", "F7"): 94.88}
+    real_parse_var = m.parse_var
+    with mock.patch.object(m.requests, "post", return_value=resp(HL_PAYLOAD)), \
+         mock.patch.object(m.requests, "get", side_effect=fake_get), \
+         mock.patch.object(m, "parse_var", lambda p: real_parse_var(p, now=NOW_UTC)), \
+         mock.patch.object(m, "fetch_future", side_effect=lambda r, c: futures[(r, c)]):
         rows = m.snapshot(now=dt.datetime(2026, 9, 28, 13, 0, tzinfo=ET))
     out = capsys.readouterr().out
     assert "X6->Z6" in out and "Z6->F7" in out
-    gold = next(r for r in rows if r["asset"] == "GOLD")
-    assert gold["gap_bps"] < 0  # HL gold snapshot was below Extended
+    wti = next(r for r in rows if r["asset"] == "WTI")
+    assert wti["var_mark"] == 92.70 and wti["pair"]
     assert any(r["asset"] == "WTI_ROLL" and "net_pct" in r for r in rows)
